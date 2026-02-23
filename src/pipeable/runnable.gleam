@@ -27,7 +27,3 @@ pub fn simple(command: String) -> Runnable {
   Runnable(command: command, args: [], contexts: [])
 }
 
-/// Wraps a single Runnable into a RunnableList.
-pub fn singleton(runnable: Runnable) -> RunnableList {
-  [Sequential(runnable: runnable)]
-}
