@@ -68,7 +68,9 @@ pub type Arg {
   TupleLitArg(fields: List(LitField))
   AccessorArg(accessor: Accessor)
   LiteralArg(literal: Literal)
-  LabelArg(label: String)
+  // Note: bare Label args are not supported — see grammar note in parser.gleam.
+  // A Label in arg position is always treated as the start of a new Invocation
+  // to resolve the PipeStep <- Invocation+ ambiguity unambiguously.
 }
 
 pub type Accessor {
