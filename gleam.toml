@@ -4,6 +4,6 @@ description = "An easy, efficient, fully-featured CI/CD pipeline in one executab
 target = "javascript"
 
 [dependencies]
-gleam_stdlib = ">= 0.34.0 and < 2.0.0"
+gleam_stdlib = { path = "../../../tmp/gleam_stdlib" }
 
 [dev-dependencies]

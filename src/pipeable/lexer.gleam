@@ -10,7 +10,7 @@ pub type LexError {
   LexError(message: String, pos: Position)
 }
 
-pub type Lexer {
+pub opaque type Lexer {
   Lexer(input: String, chars: List(String), pos: Position)
 }
 

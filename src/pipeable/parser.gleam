@@ -1,3 +1,98 @@
+////
+//// # Pipeable Language Parser
+////
+//// Recursive-descent parser converting a token stream into an AST.
+////
+//// ## PEG Grammar
+////
+//// ### Top Level
+////
+////     File        <- Statement* EOF
+////     Statement   <- _ (Use / TypeDecl / ArtifactDecl / JobDecl / LetDecl) _
+////
+//// ### Use
+////
+////     Use         <- "use" _ Label _ ":" _ Path
+////
+////     Path        <- URL / FilePath
+////     URL         <- ("https" / "http" / "ssh") "://" PathChars+
+////     FilePath    <- ("~/" / "./" / "/") PathChars*
+////     PathChars   <- [a-zA-Z0-9._~:@!$&'()*+;=%-] / "/"
+////
+//// ### Type Declarations
+////
+////     TypeDecl    <- "type" _ Label _ ":" _ TypeExpr
+////
+////     TypeExpr    <- PrimType / ArrayType / TupleType / ObjectType / Label
+////     PrimType    <- "url" / "filepath" / "duration" / "int" / "num" / "string"
+////     ArrayType   <- "[" _ TypeExpr _ "]"
+////     TupleType   <- "(" _ TypeExpr _ ("," _ TypeExpr _)* ","? _ ")"
+////     ObjectType  <- "{" _ ObjectField _ ("," _ ObjectField _)* ","? _ "}"
+////     ObjectField <- Label _ ":" _ TypeExpr
+////
+//// ### Artifact Declarations
+////
+////     ArtifactDecl   <- "artifact" _ Label _ Label _ ":" _ "{" _ ArtifactFields _ "}"
+////     ArtifactFields <- ArtifactField ("," _ ArtifactField)* ","?
+////     ArtifactField  <- "maxVersions" _ ":" _ IntLit
+////                    / "cacheFor"    _ ":" _ DurationLit
+////
+//// ### Job Declarations
+////
+////     JobDecl     <- "job" _ Label _ JobParams? _ ":" _ JobBody
+////     JobParams   <- "{" _ ParamField ("," _ ParamField)* ","? _ "}"
+////     ParamField  <- Label _ ":" _ (TypeExpr / Label)
+////
+////     JobBody     <- PipeStep ("," _ PipeStep)* ";"
+////     PipeStep    <- Invocation+
+////     Invocation  <- Label (_ Arg)?
+////     Arg         <- TupleLit / Accessor / Literal
+////
+////     Note: The grammar also allows a bare Label as an Arg, but this is
+////     excluded here because `PipeStep <- Invocation+` creates an ambiguity:
+////     a Label could begin a new invocation or be an arg to the current one.
+////     The parser resolves this by always treating a Label as a new invocation.
+////
+//// ### Let Declarations
+////
+////     LetDecl     <- "let" _ Label _ ":" _ Literal
+////
+//// ### Accessors
+////
+////     Accessor    <- "$." AccessPath
+////                  / "$"
+////     AccessPath  <- (Label / Index) ("." (Label / Index))*
+////     Index       <- [0-9]+
+////
+//// ### Literals
+////
+////     Literal     <- DurationLit / NumLit / IntLit / StringLit
+////                  / URLLit / FilePathLit / TupleLit / ArrayLit / ObjectLit
+////
+////     IntLit      <- [0-9]+
+////     NumLit      <- [0-9]+ "." [0-9]*
+////     StringLit   <- '"' StringChar* '"'
+////     StringChar  <- ![\\""] . / "\\" .
+////     DurationLit <- [0-9]+ DurationUnit
+////     DurationUnit <- "ms" / "s" / "m" / "h" / "d"
+////     URLLit      <- ("https" / "http" / "ssh") "://" PathChars+
+////     FilePathLit <- ("~/" / "./" / "/") PathChars*
+////
+////     TupleLit    <- "(" _ LitField _ ("," _ LitField _)* ","? _ ")"
+////     ArrayLit    <- "[" _ LitField _ "]"
+////     ObjectLit   <- "{" _ ObjLitField _ ("," _ ObjLitField _)* ","? _ "}"
+////     ObjLitField <- Label _ ":" _ LitField
+////     LitField    <- Literal / Accessor
+////
+//// ### Shared
+////
+////     Label       <- [a-zA-Z] [a-zA-Z0-9]*
+////     _           <- (Whitespace / Comment)*
+////     Whitespace  <- [ \t\n\r]+
+////     Comment     <- "#" (!"\n" .)* "\n"?
+////     EOF         <- !.
+////
+
 import gleam/int
 import gleam/list
 import gleam/result
@@ -26,7 +121,7 @@ pub type ParseError {
   ParseError(message: String, pos: Position)
 }
 
-pub type Parser {
+pub opaque type Parser {
   Parser(tokens: List(Token))
 }
 
@@ -398,15 +493,13 @@ fn parse_comma_artifact_fields(
 fn parse_job_decl(parser: Parser) -> Result(#(Statement, Parser), ParseError) {
   use #(_, parser) <- result.try(expect(parser, Job))
   use #(label, parser) <- result.try(expect_label(parser))
-  let #(params, parser) = case peek(parser) {
-    LBrace -> {
-      case parse_job_params(parser) {
-        Ok(#(p, rest)) -> #(p, rest)
-        Error(_) -> #([], parser)
-      }
-    }
-    _ -> #([], parser)
-  }
+  // JobParams is optional: only attempt to parse if we see an opening brace.
+  // Since `{` unambiguously starts params (job bodies start with a Label),
+  // any parse failure inside the braces is a real error and should propagate.
+  use #(params, parser) <- result.try(case peek(parser) {
+    LBrace -> parse_job_params(parser)
+    _ -> Ok(#([], parser))
+  })
   use #(_, parser) <- result.try(expect(parser, Colon))
   use #(body, parser) <- result.try(parse_job_body(parser))
   Ok(#(
@@ -652,27 +745,14 @@ fn parse_tuple_lit(
   Ok(#(TupleLiteral(fields: [first, ..list.reverse(rest)]), parser))
 }
 
+// ArrayLit <- "[" _ LitField _ "]"  (exactly one element per grammar)
 fn parse_array_lit(
   parser: Parser,
 ) -> Result(#(Literal, Parser), ParseError) {
   use #(_, parser) <- result.try(expect(parser, LBracket))
-  use #(fields, parser) <- result.try(parse_array_lit_fields(parser))
+  use #(field, parser) <- result.try(parse_lit_field(parser))
   use #(_, parser) <- result.try(expect(parser, RBracket))
-  Ok(#(ArrayLiteral(fields: fields), parser))
-}
-
-fn parse_array_lit_fields(
-  parser: Parser,
-) -> Result(#(List(LitField), Parser), ParseError) {
-  case peek(parser) {
-    RBracket -> Ok(#([], parser))
-    _ -> {
-      use #(first, parser) <- result.try(parse_lit_field(parser))
-      use #(rest, parser) <- result.try(parse_comma_lit_fields(parser, []))
-      let parser = skip_optional(parser, Comma)
-      Ok(#([first, ..list.reverse(rest)], parser))
-    }
-  }
+  Ok(#(ArrayLiteral(fields: [field]), parser))
 }
 
 fn parse_object_lit(
